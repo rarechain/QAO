@@ -52,7 +52,7 @@ contract QAOVotingEngine is Ownable {
         _qaoToken = QAOToken(qaoTokenAddr);
     }
 
-    function quaToken() external view returns (address) {
+    function qaoToken() external view returns (address) {
         return address(_qaoToken);
     }
 
