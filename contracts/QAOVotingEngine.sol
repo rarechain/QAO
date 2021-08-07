@@ -1,4 +1,5 @@
-pragma solidity 0.8.1;
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.1;
 
 import "./QAOToken.sol";
 
@@ -6,227 +7,230 @@ contract QAOVotingEngine is Ownable {
 
     struct Vote {
         address creator;
-        uint256 creationTimestamp;
-        uint256 endTimestamp;
+        uint256 timestamp;
         uint256 votePositive;
         uint256 voteNegative;
-        bool active;
+        bool valid;
         string heading;
         string description;
     }
 
     struct VoteAttendance {
+        uint256 vote;
         uint256 amount;
-        uint256 timestamp; // if lockOption = 1, timestamp of the staking; if lockOption = 2 unlock timestamp
-        uint8 lockOption; // 0 = no locking, 1 = locking until vote has ended, 2 = locking until timestamp has been reached
+        uint256 timestamp; // vote timestamp
+        uint256 lockWeeks; // lock time in weeks
         bool position;
         bool withdrawn;
     }
 
     modifier validVote(uint256 voteId){
-        require(voteId > 0 && voteId <= _voteCounter, "QAO Vote Engine: Not a valid vote id.");
+        require(voteId >= 0 && voteId <= _voteCounter, "QAO Vote Engine: Not a valid vote id.");
+        _;
+    }
+
+    modifier validVoteAttendance(address user, uint256 attendanceId){
+        require(attendanceId >= 0 && attendanceId <= _userToVoteAttendanceCounter[user], "QAO Vote Engine: Not a valid attendance id for user.");
         _;
     }
 
     event StartOfVote(uint256 voteId);
-    event EndOfVote(uint256 voteId);
+    event AttendanceSubmitted(address user, uint256 voteId, uint256 attendanceId);
+    event AttendanceWithdrawn(address user, uint256 voteId, uint256 attendanceId);
+    event QuorumReached(uint256 voteId);
 
     /**** MEMBERS ********************************************* */
 
-    uint256 public constant INIT_VOTE_AMOUNT = 1000000 ether;
-    uint256 public constant END_VOTE_AMOUNT = 10000000 ether;
-    uint256 private constant WEEK_IN_SECONDS = 604800;
+    uint256 private _initialVoteStake = 100000000 ether;
+    uint256 private _voteQuorum = 1000000000 ether;
+
+    uint256 public constant VOTE_MAX_TIME = 1 weeks;
     uint256 private constant DIV_ACCURACY = 1 ether;
 
+    uint256 public constant BURN_PER_VOTE = 0.0125 ether;
+    uint256 public constant REWARD_PER_VOTE = 0.0125 ether;
 
     QAOToken private _qaoToken;
+    address private _rewardPool;
     uint256 private _voteCounter = 0;
 
     mapping(uint256 => Vote) private _idToVote;
+
+    mapping(address => uint256) private _userToVoteAttendanceCounter;
     mapping(address => mapping (uint256 => VoteAttendance)) private _userToVoteToAttendance;
 
-    mapping(uint256 => uint256) internal _weekToMultiplier;
 
-
-    constructor(address qaoTokenAddr) {
+    constructor(address qaoTokenAddr, address rewardPool) {
         _qaoToken = QAOToken(qaoTokenAddr);
+        _rewardPool = rewardPool;
     }
 
     function qaoToken() external view returns (address) {
         return address(_qaoToken);
     }
 
-    function createVote(string calldata heading, string calldata description) external {
-        require(_qaoToken.transferFrom(_msgSender(), address(this), INIT_VOTE_AMOUNT), 
+    function createVote(string calldata heading, string calldata description, uint256 lockWeeks) external {
+
+        require(_qaoToken.transferFrom(_msgSender(), address(this), _initialVoteStake), 
                 "QAO Voting Engine: Not enough token approved to engine to init a vote.");
         
-        _voteCounter = _voteCounter + 1;
-        _idToVote[_voteCounter] = Vote(_msgSender(), block.timestamp, 0, INIT_VOTE_AMOUNT, 0, true, heading, description);
-        _userToVoteToAttendance[_msgSender()][_voteCounter] = VoteAttendance(INIT_VOTE_AMOUNT, block.timestamp, 1, true, false);
+        require(lockWeeks > 0 && lockWeeks <= 520, 
+                "QAO Voting Engine: Token locking time needs to be between 1 week and 10 years (520 weeks).");
+
+        // *** step 2 - burn 1.25% and send 1.25% to reward pool
+        uint256 burnAmount = (_initialVoteStake * BURN_PER_VOTE) / DIV_ACCURACY;
+        uint256 rewardPoolAmount = (_initialVoteStake * REWARD_PER_VOTE) / DIV_ACCURACY;
+
+        _qaoToken.burn(burnAmount);
+        _qaoToken.transfer(_rewardPool, rewardPoolAmount);
+
+        _idToVote[_voteCounter] = Vote(_msgSender(), block.timestamp, (_initialVoteStake - burnAmount - rewardPoolAmount), 0, false, heading, description);
+
+        uint256 voteAttendanceId = _userToVoteAttendanceCounter[_msgSender()];
+        _userToVoteToAttendance[_msgSender()][voteAttendanceId] = VoteAttendance(_voteCounter, (_initialVoteStake - burnAmount - rewardPoolAmount) , block.timestamp, lockWeeks, true, false);
+        
         emit StartOfVote(_voteCounter);
+        emit AttendanceSubmitted(_msgSender(), _voteCounter, voteAttendanceId);
+
+        _voteCounter = _voteCounter + 1;
+        _userToVoteAttendanceCounter[_msgSender()] = voteAttendanceId + 1;
     }
 
-    function vote(uint256 voteId, uint256 tokenAmount, uint256 lockWeeks, uint8 lockOption, bool position) external validVote(voteId) {
+
+    function vote(uint256 voteId, uint256 tokenAmount, uint256 lockWeeks, bool position) external validVote(voteId) {
 
         // *** step 1 - pre-checks ***
-        require(_idToVote[voteId].active, "QAO Voting Engine: Vote is not active.");
+
+        require(tokenAmount >= 1, 
+                "QAO Voting Engine: Minimum 1 QAO for voting/staking");
+
+        // check if vote is still active
+        require(voteIsActive(voteId), "QAO Voting Engine: Vote is not active.");
 
         require(_qaoToken.transferFrom(_msgSender(), address(this), tokenAmount), 
                 "QAO Voting Engine: Not enough token approved to engine to submit the vote.");
-        
-        require(_userToVoteToAttendance[_msgSender()][voteId].amount == 0, 
-                "QAO Voting Engine: Sender already attended this vote.");
-        
-        require(lockWeeks >= 0 && lockWeeks <= 520, 
+
+        require(lockWeeks > 0 && lockWeeks <= 520, 
                 "QAO Voting Engine: Token locking time needs to be between 1 week and 10 years (520 weeks).");
         
-        require(lockOption >= 0 && lockOption <= 2,
-                "QAO Voting Engine: Lock option any only be 0, 1 or 2.");
+        // *** step 2 - burn 1.25% and send 1.25% to reward pool
+        uint256 burnAmount = (tokenAmount * BURN_PER_VOTE) / DIV_ACCURACY;
+        uint256 rewardPoolAmount = (tokenAmount * REWARD_PER_VOTE) / DIV_ACCURACY;
+
+        _qaoToken.burn(burnAmount);
+        _qaoToken.transfer(_rewardPool, rewardPoolAmount);
+
+
+        uint256 voteAttendanceId = _userToVoteAttendanceCounter[_msgSender()];
+        _userToVoteToAttendance[_msgSender()][voteAttendanceId] = VoteAttendance(voteId, 
+                                                                        (tokenAmount - burnAmount - rewardPoolAmount),
+                                                                         block.timestamp, lockWeeks, position, false);
         
-
-        // *** step 2 - calculate reward/voting weight ***
-        uint256 votingMultiplier = lockOption == 2 ? _weekToMultiplier[lockWeeks] : 1 ether;
-        uint256 votingWeight = (tokenAmount * votingMultiplier) / DIV_ACCURACY;
-
-        uint256 timestamp = 0;
-        if (lockOption == 1){ //timestamp is the vote time for later reward calculation
-            timestamp = block.timestamp;
-        }
-        if (lockOption == 2){ //timestamp is the unlock time 
-            timestamp = block.timestamp + (lockWeeks * WEEK_IN_SECONDS);
-        }
-        
-        _userToVoteToAttendance[_msgSender()][voteId] = VoteAttendance(votingWeight, timestamp, lockOption, position, false);
-
-        // mint the reward for option 2 users and lock it with the staked amount of token
-        uint256 reward = votingWeight - tokenAmount;
-        _qaoToken.mintVoteStakeReward(reward);
+        emit AttendanceSubmitted(_msgSender(), voteId, voteAttendanceId);
+        _userToVoteAttendanceCounter[_msgSender()] = voteAttendanceId + 1;
 
         // *** step 3 - update vote ***
         if (position){
-            _idToVote[voteId].votePositive = _idToVote[voteId].votePositive + votingWeight;
+            _idToVote[voteId].votePositive = _idToVote[voteId].votePositive + tokenAmount;
         }
         else {
-            _idToVote[voteId].voteNegative = _idToVote[voteId].voteNegative + votingWeight;
+            _idToVote[voteId].voteNegative = _idToVote[voteId].voteNegative + tokenAmount;
         }
 
-        // check if end of vote has been reached
-        if ((_idToVote[voteId].votePositive + _idToVote[voteId].voteNegative) >= END_VOTE_AMOUNT){
-            _idToVote[voteId].active = false;
-            _idToVote[voteId].endTimestamp = block.timestamp;
-            emit EndOfVote(voteId);
+        // check if vote quorum has been reached and thus the vote becomes valid
+        if ((_idToVote[voteId].votePositive + _idToVote[voteId].voteNegative) >= _voteQuorum){
+            _idToVote[voteId].valid = true;
+            emit QuorumReached(voteId);
         }
     }
 
 
-    function withdrawFromVote(uint256 voteId) external validVote(voteId) {
+    function withdrawFromVoteAttendance(uint256 attendanceId) external validVoteAttendance(_msgSender(), attendanceId) {
+
+        VoteAttendance memory voteAttendance = _userToVoteToAttendance[_msgSender()][attendanceId];
+        require(!voteAttendance.withdrawn, "QAO Voting Engine: Token have already been withdrawn.");
         
-        require(!_userToVoteToAttendance[_msgSender()][voteId].withdrawn,
-                "QAO Voting Engine: Token have already been withdrawn.");
-        
-        uint8 option =  _userToVoteToAttendance[_msgSender()][voteId].lockOption;
+        uint256 unlockTimestamp = voteAttendance.timestamp + voteAttendance.lockWeeks * 1 weeks;
+        require(!voteIsActive(voteAttendance.vote), "QAO Voting Engine: Vote is still active.");
+        require(block.timestamp >= unlockTimestamp, "QAO Voting Engine: Tokens are still locked.");
 
-        // option 0 = no locking
-        if (option == 0) {
-            uint256 amount = _userToVoteToAttendance[_msgSender()][voteId].amount;
-            _qaoToken.transfer(_msgSender(), amount);
-            _userToVoteToAttendance[_msgSender()][voteId].withdrawn = true;
-
-            // if vote is still active, the vote becomes invalid
-            if(_idToVote[voteId].active){
-                if(_userToVoteToAttendance[_msgSender()][voteId].position){
-                    _idToVote[voteId].votePositive = _idToVote[voteId].votePositive - amount;
-                }
-                else {
-                    _idToVote[voteId].voteNegative = _idToVote[voteId].voteNegative - amount;
-                }
-            }
-        }
-
-        // option 1 = until vote end (including special case for vore creator)
-        else if (option == 1) {
-            
-            require(!_idToVote[voteId].active, "QAO Voting Engine: Tokens are still locked (option 1).");
-            // calculate passed weeks & reward
-            uint256 timeDiff = _idToVote[voteId].endTimestamp - _userToVoteToAttendance[_msgSender()][voteId].timestamp;
-            uint256 passedWeeks = timeDiff / WEEK_IN_SECONDS;
-            uint256 rewardMultiplier = _weekToMultiplier[passedWeeks];
-            uint256 reward = (_userToVoteToAttendance[_msgSender()][voteId].amount * rewardMultiplier) / DIV_ACCURACY;
-            reward = reward - _userToVoteToAttendance[_msgSender()][voteId].amount;
-
-            // apply additional multiplier if sender is creator of the vote
-            if (_idToVote[voteId].creator == _msgSender()){
-                reward = reward * 2;
-            }
-
-            // mint reward and transfer whole token amount
-            _qaoToken.mintVoteStakeReward(reward);
-            _qaoToken.transfer(_msgSender(), _userToVoteToAttendance[_msgSender()][voteId].amount + reward);
-            _userToVoteToAttendance[_msgSender()][voteId].withdrawn = true;
-        }
-
-        // option 2 = until end of lock time has been reached
-        else {
-            require(block.timestamp >= _userToVoteToAttendance[_msgSender()][voteId].timestamp,
-                "QAO Voting Engine: Tokens used for this vote are still locked (option 2).");
-            _qaoToken.transfer(_msgSender(), _userToVoteToAttendance[_msgSender()][voteId].amount);
-            _userToVoteToAttendance[_msgSender()][voteId].withdrawn = true;
-        }
+        _qaoToken.transfer(_msgSender(), voteAttendance.amount);
+        _userToVoteToAttendance[_msgSender()][attendanceId].withdrawn = true;
+        emit AttendanceWithdrawn(_msgSender(), voteAttendance.vote, attendanceId);
     }
-
+        
     /*******************************************************************
-     * Getters/ Setters for week-based reward multiplier
+     * Getters/ Setters for reward pool
      *******************************************************************/ 
+     function rewardPool() external view returns (address) {
+         return _rewardPool;
+     }
 
-    function rewardByWeek(uint256 week) external view returns (uint256) {
-        require(week >= 0 && week <= 520, 
-                "QAO Voting Engine: week needs to be between 1 week and 10 years (520 weeks).");
-        return _weekToMultiplier[week];
+     function setRewardPool(address newPool) external onlyOwner {
+         require(newPool != address(0), "QAO Voting Engine: AddressZero cannot be reward pool");
+         _rewardPool = newPool;
+     } 
+    
+    /*******************************************************************
+     * Getters/ Setters for general vote variables
+     *******************************************************************/ 
+         function initialVoteStake() external view returns (uint256) {
+        return _initialVoteStake;
     }
 
-    function setRewardByWeek(uint256 week, uint256 reward) external onlyOwner {
-        require(week >= 0 && week <= 520, 
-                "QAO Voting Engine: week needs to be between 1 week and 10 years (520 weeks).");
-        _weekToMultiplier[week] = reward;
+    function setInitialVoteStake(uint256 newStake) external onlyOwner {
+        _initialVoteStake = newStake;
+    } 
+
+    function voteQuorum() external view returns (uint256) {
+        return _voteQuorum;
+    }
+    function setVoteQuorum(uint256 newQuorum) external onlyOwner {
+        _voteQuorum = newQuorum;
     }
 
     /*******************************************************************
      * Vote Getters
      *******************************************************************/
-    function voteHeading(uint256 voteId) public view validVote(voteId) returns (string memory) {
-        return _idToVote[voteId].heading;  
-    }
 
-    function voteDescription(uint256 voteId) public view validVote(voteId) returns (string memory) {
-        return _idToVote[voteId].description; 
-    }
+    function getVote(uint256 voteId) external view validVote(voteId) 
+        returns (address, uint256, uint256, uint256, bool, string memory, string memory) {
 
-    function voteCreator(uint256 voteId) public view validVote(voteId) returns (address) {
-        return _idToVote[voteId].creator; 
-    }
+            Vote memory vote = _idToVote[voteId];
 
-    function voteCreationTimestamp(uint256 voteId) public view validVote(voteId) returns (uint256) {
-        return _idToVote[voteId].creationTimestamp; 
-    }
-
-    function voteEndTimestamp(uint256 voteId) public view validVote(voteId) returns (uint256) {
-        return _idToVote[voteId].endTimestamp; 
+            return (vote.creator,
+                    vote.timestamp,
+                    vote.votePositive,
+                    vote.voteNegative,
+                    vote.valid,
+                    vote.heading,
+                    vote.description);
     }
 
     function voteIsActive(uint256 voteId) public view validVote(voteId) returns (bool) {
-        return _idToVote[voteId].active; 
+        return _idToVote[voteId].timestamp + VOTE_MAX_TIME > block.timestamp;
     }
 
-    function voteSuccess(uint256 voteId) public view validVote(voteId) returns (bool) {
+    function voteSuccess(uint256 voteId) external view validVote(voteId) returns (bool) {
         return _idToVote[voteId].votePositive > _idToVote[voteId].voteNegative; 
     }
 
-    function voteResultPositive(uint256 voteId) public view validVote(voteId) returns (uint256) {
-        return _idToVote[voteId].votePositive; 
-    }
 
-    function voteResultNegative(uint256 voteId) public view validVote(voteId) returns (uint256) {
-        return _idToVote[voteId].voteNegative; 
+    /*******************************************************************
+     * Attendance Getters
+     *******************************************************************/
+    
+    function getAttendance(address user, uint256 attendanceId) external view validVoteAttendance(user, attendanceId)
+        returns (uint256, uint256, uint256, uint256, bool, bool) {
+
+            VoteAttendance memory attendance = _userToVoteToAttendance[user][attendanceId];
+
+            return (attendance.vote,
+                    attendance.amount,
+                    attendance.timestamp,
+                    attendance.lockWeeks,
+                    attendance.position,
+                    attendance.withdrawn);
     }
 
 }

@@ -1,3 +1,5 @@
+const { swapLiqPoolAddress, treasuryAddress } = require('../secrets.json');
+
 async function main() {
 
     const [deployer] = await ethers.getSigners();
@@ -10,7 +12,7 @@ async function main() {
     console.log("Account balance:", (await deployer.getBalance()).toString());
   
     const Token = await ethers.getContractFactory("QAOToken");
-    const token = await Token.deploy('0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266', '0x70997970c51812dc3a010c7d01b50e0d17dc79c8');
+    const token = await Token.deploy(swapLiqPoolAddress, treasuryAddress);
   
     console.log("Token address:", token.address);
   }
