@@ -2,7 +2,7 @@ import { HardhatUserConfig } from "hardhat/types";
 import "@nomiclabs/hardhat-waffle";
 import "hardhat-typechain";
 
-//const { mnemonic } = require('./secrets.json');
+const { rinkebyAccount, infuraProjectId, localhostDeployAccount } = require('./secrets.json');
 
 const config: HardhatUserConfig = {
     defaultNetwork: "hardhat", 
@@ -14,12 +14,19 @@ const config: HardhatUserConfig = {
       }],
     },
     networks: {
+        localhost: {
+            url: "http://localhost:8545",
+            accounts: [localhostDeployAccount]
+        },
         testnet: {
-            url: "https://data-seed-prebsc-1-s1.binance.org:8545/",
-            chainId: 97,
+            url: "http://localhost:8545",
+            chainId: 31337,
             gasPrice: 20000000000,
-            //accounts: {mnemonic: mnemonic}
-        }
+        },
+        rinkeby: {
+            url: "https://rinkeby.infura.io/v3/"+infuraProjectId,
+            accounts: [rinkebyAccount]
+        },
     }
 };
         

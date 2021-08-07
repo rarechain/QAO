@@ -1,4 +1,5 @@
-pragma solidity 0.8.1;
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.1;
 
 import "./ERC20BurnableCustomized.sol";
 import "openzeppelin-solidity/contracts/access/Ownable.sol";
