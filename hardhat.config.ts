@@ -2,7 +2,7 @@ import { HardhatUserConfig } from "hardhat/types";
 import "@nomiclabs/hardhat-waffle";
 import "hardhat-typechain";
 
-const { rinkebyAccount, infuraProjectId, localhostDeployAccount } = require('./secrets.json');
+const { mainnetAccount, rinkebyAccount, infuraProjectId, localhostDeployAccount } = require('./secrets.json');
 
 const config: HardhatUserConfig = {
     defaultNetwork: "hardhat", 
@@ -26,6 +26,10 @@ const config: HardhatUserConfig = {
         rinkeby: {
             url: "https://rinkeby.infura.io/v3/"+infuraProjectId,
             accounts: [rinkebyAccount]
+        },
+        mainnet: {
+            url: "https://mainnet.infura.io/v3/"+infuraProjectId,
+            accounts: [mainnetAccount]
         },
     }
 };
