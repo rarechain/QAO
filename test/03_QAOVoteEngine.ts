@@ -62,7 +62,6 @@ describe("Qao Vote Engine", () => {
             voteId = event?.args?.voteId;
 
 
-
             // balance checks
             const voteEngineBalanceAfter: BigNumber = await token.balanceOf(voteEngine.address);
             const rewardPoolBalanceAfter: BigNumber = await token.balanceOf(rewardPool.address);
@@ -93,6 +92,21 @@ describe("Qao Vote Engine", () => {
             expect(attendance[3]).to.eq(1);
             expect(attendance[4]).to.eq(true);
             expect(attendance[5]).to.eq(false);
+        });
+
+        it("additional vote participation", async() => {
+
+            await token.connect(swapLiqPool).transfer(accounts[2].address, ethers.utils.parseEther("50000"));
+            await token.connect(accounts[2]).approve(voteEngine.address, ethers.utils.parseEther("50000"));
+            await voteEngine.connect(accounts[2]).vote(voteId, ethers.utils.parseEther("50000"), 520, true);
+
+            const voteAttendance = await voteEngine.getAttendance(accounts[2].address, 0);
+            expect(voteAttendance[0]).to.eq(voteId);
+            expect(voteAttendance[1]).to.eq(ethers.utils.parseEther("48750"));
+            // voteAttendance[2] skip timestamp check
+            expect(voteAttendance[3]).to.eq(520);
+            expect(voteAttendance[4]).to.eq(true);
+            expect(voteAttendance[5]).to.eq(false);
         });
 
 
